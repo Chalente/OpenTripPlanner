@@ -10,6 +10,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import org.locationtech.jts.geom.Coordinate;
 import org.locationtech.jts.geom.Geometry;
 import org.locationtech.jts.geom.LineString;
@@ -59,7 +60,7 @@ public class OpenStreetMapModule implements GraphBuilderModule {
 
   private static final Logger LOG = LoggerFactory.getLogger(OpenStreetMapModule.class);
 
-  private final Map<Vertex, Double> elevationData = new HashMap<>();
+  private final Map<Vertex, Double> elevationData = new ConcurrentHashMap<>();
 
   // Private members that are only read or written internally.
   /**
@@ -152,7 +153,7 @@ public class OpenStreetMapModule implements GraphBuilderModule {
   }
 
   public Map<Vertex, Double> elevationDataOutput() {
-    return elevationData;
+    return Map.copyOf(elevationData);
   }
 
   private record StreetEdgePair(StreetEdge main, StreetEdge back) {}
@@ -168,9 +169,9 @@ public class OpenStreetMapModule implements GraphBuilderModule {
     private final OSMDatabase osmdb;
     // track OSM nodes which are decomposed into multiple graph vertices because they are
     // elevators. later they will be iterated over to build ElevatorEdges between them.
-    private final HashMap<Long, Map<OSMLevel, OsmVertex>> multiLevelNodes = new HashMap<>();
+    private final Map<Long, Map<OSMLevel, OsmVertex>> multiLevelNodes = new ConcurrentHashMap<>();
     // track OSM nodes that will become graph vertices because they appear in multiple OSM ways
-    private final Map<Long, IntersectionVertex> intersectionNodes = new HashMap<>();
+    private final Map<Long, IntersectionVertex> intersectionNodes = new ConcurrentHashMap<>();
     /**
      * The bike safety factor of the safest street
      */
@@ -475,7 +476,7 @@ public class OpenStreetMapModule implements GraphBuilderModule {
       ProgressTracker progress = ProgressTracker.track("Build street graph", 5_000, wayCount);
       LOG.info(progress.startMessage());
 
-      WAY:for (OSMWay way : osmdb.getWays()) {
+      osmdb.getWays().parallelStream().forEach(way -> {
         WayProperties wayData = way.getOsmProvider().getWayPropertySet().getDataForWay(way);
         setWayName(way);
         StreetTraversalPermission permissions = OSMFilter.getPermissionsForWay(
@@ -485,7 +486,7 @@ public class OpenStreetMapModule implements GraphBuilderModule {
           banDiscouragedBiking,
           issueStore
         );
-        if (!OSMFilter.isWayRoutable(way) || permissions.allowsNothing()) continue;
+        if (!OSMFilter.isWayRoutable(way) || permissions.allowsNothing()) return;
 
         // handle duplicate nodes in OSM ways
         // this is a workaround for crappy OSM data quality
@@ -496,7 +497,7 @@ public class OpenStreetMapModule implements GraphBuilderModule {
         for (TLongIterator iter = way.getNodeRefs().iterator(); iter.hasNext();) {
           long nodeId = iter.next();
           OSMNode node = osmdb.getNode(nodeId);
-          if (node == null) continue WAY;
+          if (node == null) return;
           boolean levelsDiffer = false;
           String level = node.getTag("level");
           if (lastLevel == null) {
@@ -623,7 +624,7 @@ public class OpenStreetMapModule implements GraphBuilderModule {
         //Keep lambda! A method-ref would log incorrect class and line number
         //noinspection Convert2MethodRef
         progress.step(m -> LOG.info(m));
-      } // END loop over OSM ways
+      });
 
       LOG.info(progress.completeMessage());
     }
@@ -776,7 +777,7 @@ public class OpenStreetMapModule implements GraphBuilderModule {
         TLongList nodes = way.getNodeRefs();
         nodes.forEach(node -> {
           if (possibleIntersectionNodes.contains(node)) {
-            intersectionNodes.put(node, null);
+            intersectionNodes.remove(node);
           } else {
             possibleIntersectionNodes.add(node);
           }
@@ -799,7 +800,7 @@ public class OpenStreetMapModule implements GraphBuilderModule {
       for (OSMNode node : outerRing.nodes) {
         long nodeId = node.getId();
         if (possibleIntersectionNodes.contains(nodeId)) {
-          intersectionNodes.put(nodeId, null);
+          intersectionNodes.remove(nodeId);
         } else {
           possibleIntersectionNodes.add(nodeId);
         }
